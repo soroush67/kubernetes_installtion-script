@@ -163,7 +163,7 @@ kubeadm join <lb.example.com>:6443 \
   --control-plane --certificate-key 1234567890abcdef1234567890abcdef
 
 
-# Install Calico by creating the necessary custom resources. for first installation
+############## Install Calico by creating the necessary custom resources. for first installation
 
 
 kubectl create -f https://raw.githubusercontent.com/projectcalico/calico/v3.30.3/manifests/custom-resources.yaml
@@ -177,6 +177,7 @@ metadata:
 spec:
   # Configures Calico networking.
   calicoNetwork:
+    #linuxDataplane: BPF                  # for enable BPF
     ipPools:
     - name: default-ipv4-ippool
       blockSize: 26
@@ -204,9 +205,14 @@ apiVersion: operator.tigera.io/v1
 kind: Whisker
 metadata:
   name: default
-  
 
-# cilium install by helm:
+#### Test for BPF was enabled:
+
+ kubectl -n calico-system logs -l k8s-app=calico-node | grep BPF ----> "Calico BPF dataplane enabled"
+
+
+
+############## cilium install by helm:
 
 helm repo add cilium https://helm.cilium.io/
 
@@ -321,5 +327,12 @@ kubectl get nodes
 kubectl get pods -A
 
 
+############# iperf Test #########
 
+'''Pod to Pod in one Node:'''
+
+kubectl run iperf-server --image=networkstatic/iperf3 -n test --restart=Never -- -s
+
+kubectl run iperf-client --image=networkstatic/iperf3 -n test --restart=Never -- \
+  -- iperf3 -c iperf-server -t 30
 
