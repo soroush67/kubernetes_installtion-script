@@ -94,7 +94,7 @@ cat <<EOF | sudo tee kubeadm.config
 apiVersion: kubeadm.k8s.io/v1beta3
 kind: InitConfiguration
 localAPIEndpoint:
-  advertiseAddress: "5.75.243.117"   # master node address
+  advertiseAddress: "MASTER_NODE"   # master node address
   bindPort: 6443
 ---
 apiVersion: kubeadm.k8s.io/v1beta3
@@ -111,8 +111,20 @@ sudo kubeadm init --config=kubeadm.config
 
 ### OR :
 
-kubeadm init  --pod-network-cidr=10.10.0.0/16  --apiserver-advertise-address=5.75.243.117 --kubernetes-version=1.32.0 --image-repository "myregistry.example.com/k8s"
+kubeadm init  --pod-network-cidr=10.10.0.0/16  --apiserver-advertise-address=<MASTER_NODE> --kubernetes-version=1.32.0 --image-repository "myregistry.example.com/k8s"
 
+without kubeproxy:
+
+kubeadm init  --pod-network-cidr=10.10.0.0/16  --apiserver-advertise-address=<MASTER_NODE> --kubernetes-version=1.32.0 --image-repository "myregistry.example.com/k8s" --skip-phases=addon/kube-proxy
+
+HA Masters:
+kubeadm init \
+  --control-plane-endpoint "k8s-lb.example.com:6443" \
+  --apiserver-advertise-address=<MASTER_NODE> \
+  --pod-network-cidr=10.10.0.0/16 \
+  --kubernetes-version=1.32.0 \
+  --image-repository="myregistry.example.com/k8s" \
+  --skip-phases=addon/kube-proxy
 
 ## kubeadm join
  
@@ -121,14 +133,12 @@ openssl x509 -pubkey -in /etc/kubernetes/pki/ca.crt \
   | openssl dgst -sha256 -hex \
   | sed 's/^.* //'
 
-
 # join worker to cluster
 kubeadm token create --print-join-command
 
 kubeadm join <MASTER_NODE>:6443 \
   --token b0ljy9.e30rkk7ub16w4y0b \
   --discovery-token-ca-cert-hash sha256:84e6eec939f3323864eda1a87406cb09fea6e9fd70d7cbab48c74e3ac29d4e797
-
 
 # join master to cluster
 kubeadm token create --print-join-command --control-plane
@@ -151,7 +161,6 @@ kubeadm join <lb.example.com>:6443 \
   --token abcdef.0123456789abcdef \
   --discovery-token-ca-cert-hash sha256:84e6eec939f3323864eda1a87406cb09fea6e9fd70d7cbab48c74e3ac29d4e797 \
   --control-plane --certificate-key 1234567890abcdef1234567890abcdef
-
 
 
 # Install Calico by creating the necessary custom resources. for first installation
@@ -206,8 +215,6 @@ helm pull cilium/cilium --version 1.18.0
 helm show values <cilium.tgz> > values.yaml
 
 helm install cilium ./<cilium.tgz>  -f values.yaml
-
-
 
 ############################ upgrade kubernetes ##########################
 
