@@ -1,0 +1,318 @@
+kubernetes installtion with kubeadm:
+
+
+cat <<EOF | sudo tee /etc/modules-load.d/k8s.conf
+overlay
+br_netfilter
+EOF
+
+sudo modprobe overlay
+sudo modprobe br_netfilter
+
+# sysctl params required by setup, params persist across reboots
+cat <<EOF | sudo tee /etc/sysctl.d/k8s.conf
+net.ipv4.ip_forward=1
+kernel.keys.root_maxbytes=25000000
+kernel.keys.root_maxkeys=1000000
+kernel.panic=10
+kernel.panic_on_oops=1
+vm.overcommit_memory=1
+vm.panic_on_oom=0
+net.ipv4.ip_local_reserved_ports=30000-32767
+net.bridge.bridge-nf-call-iptables=1
+net.bridge.bridge-nf-call-arptables=1
+net.bridge.bridge-nf-call-ip6tables=1
+EOF
+
+# Apply sysctl params without reboot
+sudo sysctl --system
+
+
+# disable swap
+free -m 
+vim /etc/fstab
+swapoff -a 
+free -m
+
+# check network ans uuid in OS: 
+ifconfig / ip -br a 
+cat /sys/class/dmi/id/product_uuid 
+
+# install containerd
+cd /usr/local
+wget -c -t 999 "containerd-<version>"
+tar Cxvfz containerd-<version>.tgz
+
+# get systemd containerd
+wget -c -t 999 "../../containerd.service"
+mv containerd.service /usr/lib/systemd/system
+systemctl daemon-reload ; systemctl enable --now containerd.service ; systemctl status containerd.service
+
+# install runc
+wget -c -t 999 "runc-<version>"
+install -m 755 runc.amd64 /usr/local/sbin/runc
+
+# configure containerd
+mkdir -p /etc/containerd
+containerd config default | sudo tee /etc/containerd/config.toml
+systemctl restart containerd.service ; systemctl status containerd.service
+
+# install CNI plugin
+mkdir -p /opt/cni/plugin
+wget -c -t 999 "cni-plugins-linux-amd64<version>.tgz"
+tar Cxvfz cni-plugins-linux-amd64<version>.tgz
+
+# edit /etc/containerd/config.toml for manage cgroup
+
+[plugins."io.containerd.grpc.v1.cri".containerd.runtimes.runc] ...
+[plugins."io.containerd.grpc.v1.cri".containerd.runtimes.runc.options]
+  SystemdCgroup = true
+
+# add kubeernetes repo and install 
+####path_1
+sudo apt update
+sudo apt install -y apt-transport-https ca-certificates curl
+sudo curl -fsSLo /usr/share/keyrings/kubernetes-archive-keyring.gpg \
+https://packages.cloud.google.com/apt/doc/apt-key.gpg
+
+echo "deb [signed-by=/usr/share/keyrings/kubernetes-archive-keyring.gpg] \
+https://apt.kubernetes.io/ kubernetes-xenial main" | \
+sudo tee /etc/apt/sources.list.d/kubernetes.list
+
+sudo apt update
+sudo apt install -y kubelet kubeadm kubectl
+sudo apt-mark hold kubelet kubeadm kubectl
+sudo kubeadm init
+
+####path_2
+for i in 'kubectl kubeadm kubelet' ;do curl -LO https://dl.k8s.io/release/v1.32.0/bin/linux/amd64/$i;done
+
+
+# kubeadm init 
+
+cat <<EOF | sudo tee kubeadm.config
+apiVersion: kubeadm.k8s.io/v1beta3
+kind: InitConfiguration
+localAPIEndpoint:
+  advertiseAddress: "5.75.243.117"   # master node address
+  bindPort: 6443
+---
+apiVersion: kubeadm.k8s.io/v1beta3
+kind: ClusterConfiguration
+kubernetesVersion: "v1.32.0"
+imageRepository: "myregistry.example.com/k8s" 
+networking:
+  podSubnet: "10.10.0.0/16"          
+  serviceSubnet: "10.96.0.0/12"      
+  dnsDomain: "cluster.local"         
+EOF
+
+sudo kubeadm init --config=kubeadm.config
+
+### OR :
+
+kubeadm init  --pod-network-cidr=10.10.0.0/16  --apiserver-advertise-address=5.75.243.117 --kubernetes-version=1.32.0 --image-repository "myregistry.example.com/k8s"
+
+
+## kubeadm join
+ 
+openssl x509 -pubkey -in /etc/kubernetes/pki/ca.crt \
+  | openssl rsa -pubin -outform der 2>/dev/null \
+  | openssl dgst -sha256 -hex \
+  | sed 's/^.* //'
+
+
+# join worker to cluster
+kubeadm token create --print-join-command
+
+kubeadm join <MASTER_NODE>:6443 \
+  --token b0ljy9.e30rkk7ub16w4y0b \
+  --discovery-token-ca-cert-hash sha256:84e6eec939f3323864eda1a87406cb09fea6e9fd70d7cbab48c74e3ac29d4e797
+
+
+# join master to cluster
+kubeadm token create --print-join-command --control-plane
+
+kubeadm init phase upload-certs --upload-certs
+----> output: certificate key: 1234567890abcdef1234567890abcdef
+
+kubeadm join <MASTER_NODE>:6443 \
+  --token abcdef.0123456789abcdef \
+  --discovery-token-ca-cert-hash sha256:84e6eec939f3323864eda1a87406cb09fea6e9fd70d7cbab48c74e3ac29d4e797 \
+  --control-plane --certificate-key 1234567890abcdef1234567890abcdef
+
+# join master to HA master:
+kubeadm init phase upload-certs --upload-certs
+---> certificate key: 1234567890abcdef1234567890abcdef
+
+kubeadm token create --print-join-command
+
+kubeadm join <lb.example.com>:6443 \
+  --token abcdef.0123456789abcdef \
+  --discovery-token-ca-cert-hash sha256:84e6eec939f3323864eda1a87406cb09fea6e9fd70d7cbab48c74e3ac29d4e797 \
+  --control-plane --certificate-key 1234567890abcdef1234567890abcdef
+
+
+
+# Install Calico by creating the necessary custom resources. for first installation
+
+
+kubectl create -f https://raw.githubusercontent.com/projectcalico/calico/v3.30.3/manifests/custom-resources.yaml
+
+# This section includes base Calico installation configuration.
+# For more information, see: https://docs.tigera.io/calico/latest/reference/installation/api#operator.tigera.io/v1.Installation
+apiVersion: operator.tigera.io/v1
+kind: Installation
+metadata:
+  name: default
+spec:
+  # Configures Calico networking.
+  calicoNetwork:
+    ipPools:
+    - name: default-ipv4-ippool
+      blockSize: 26
+      cidr: 10.10.0.0/16
+      encapsulation: VXLANCrossSubnet
+      natOutgoing: Enabled
+      nodeSelector: all()
+---
+# This section configures the Calico API server.
+# For more information, see: https://docs.tigera.io/calico/latest/reference/installation/api#operator.tigera.io/v1.APIServer
+apiVersion: operator.tigera.io/v1
+kind: APIServer
+metadata:
+  name: default
+spec: {}
+---
+# Configures the Calico Goldmane flow aggregator.
+apiVersion: operator.tigera.io/v1
+kind: Goldmane
+metadata:
+  name: default
+---
+# Configures the Calico Whisker observability UI.
+apiVersion: operator.tigera.io/v1
+kind: Whisker
+metadata:
+  name: default
+  
+
+# cilium install by helm:
+
+helm repo add cilium https://helm.cilium.io/
+
+helm pull cilium/cilium --version 1.18.0
+
+helm show values <cilium.tgz> > values.yaml
+
+helm install cilium ./<cilium.tgz>  -f values.yaml
+
+
+
+############################ upgrade kubernetes ##########################
+
+##### script for ETCD Backup
+#!/bin/bash
+BACKUP_DIR="/var/backups/etcd"
+DATE=$(date +%Y%m%d-%H%M%S)
+FILENAME="etcd-snapshot-$DATE.db"
+CACERT="/etc/kubernetes/pki/etcd/ca.crt"
+CERT="/etc/kubernetes/pki/etcd/server.crt"
+KEY="/etc/kubernetes/pki/etcd/server.key"
+
+mkdir -p $BACKUP_DIR
+
+echo "[INFO] Taking etcd snapshot..."
+ETCDCTL_API=3 etcdctl snapshot save $BACKUP_DIR/$FILENAME \
+  --endpoints=https://127.0.0.1:2379 \
+  --cacert=$CACERT \
+  --cert=$CERT \
+  --key=$KEY
+
+if [ $? -eq 0 ]; then
+  echo "[INFO] Snapshot saved: $BACKUP_DIR/$FILENAME"
+  ETCDCTL_API=3 etcdctl snapshot status $BACKUP_DIR/$FILENAME -w table
+else
+  echo "[ERROR] Snapshot failed!"
+  exit 1
+fi
+
+find $BACKUP_DIR -type f -name "etcd-snapshot-*.db" -mtime +7 -exec rm -f {} \;
+
+echo "[INFO] Old snapshots cleaned."
+
+
+# Kubernetes Upgrade (kubeadm)
+
+## for all nodes 
+apt update
+apt install -y apt-transport-https ca-certificates curl
+
+curl -fsSLo /usr/share/keyrings/kubernetes-archive-keyring.gpg \
+  https://packages.cloud.google.com/apt/doc/apt-key.gpg
+
+echo "deb [signed-by=/usr/share/keyrings/kubernetes-archive-keyring.gpg] \
+https://apt.kubernetes.io/ kubernetes-xenial main" \
+  | tee /etc/apt/sources.list.d/kubernetes.list
+
+
+##  2. first Master (Control Plane Node #1)
+
+### 2.1 upgrade kubeadm
+
+apt-get update
+apt-get install -y kubeadm=1.28.x-00
+
+### 2.2 check plan
+
+kubeadm upgrade plan
+
+### 2.3 upgrade Flow
+
+kubeadm upgrade apply v1.28.x
+
+### 2.4 upgrade kubelet و kubectl
+
+
+apt-get install -y kubelet=1.28.x-00 kubectl=1.28.x-00
+systemctl daemon-reexec
+systemctl restart kubelet
+
+---
+
+## 3. Master (Control Plane Node #2, #3, …)
+
+
+apt-get install -y kubeadm=1.28.x-00
+kubeadm upgrade node
+apt-get install -y kubelet=1.28.x-00 kubectl=1.28.x-00
+systemctl daemon-reexec
+systemctl restart kubelet
+
+---
+
+## 4. Worker Nodes one-by-one
+
+### 4.1 Drain the node
+
+kubectl drain <node-name> --ignore-daemonsets --delete-emptydir-data
+
+### 4.2 upgrade kubeadm
+
+apt-get install -y kubeadm=1.28.x-00
+kubeadm upgrade node
+
+### 4.3 upgrade kubelet
+
+apt-get install -y kubelet=1.28.x-00
+systemctl daemon-reexec
+systemctl restart kubelet
+
+kubectl uncordon <node-name>
+
+kubectl get nodes
+kubectl get pods -A
+
+
+
+
