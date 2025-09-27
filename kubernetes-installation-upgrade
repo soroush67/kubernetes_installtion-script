@@ -329,10 +329,20 @@ kubectl get pods -A
 
 ############# iperf Test #########
 
-```Pod to Pod in one Node:```
+Pod to Pod in one Node:
+kubectl run iperf-server -n web --image=networkstatic/iperf3 --restart=Never --overrides='{"spec":{"nodeSelector":{"kubernetes.io/hostname":"worker1"}}}' -- -s
+kubectl expose pod iperf-server -n web --port=5201 --target-port=5201 --name=iperf-service
+kubectl run iperf-client -n web --image=networkstatic/iperf3 --restart=Never --overrides='{"spec":{"nodeSelector":{"kubernetes.io/hostname":"worker1"}}}' -- iperf3 -c iperf-service.web -t 30
 
-kubectl run iperf-server --image=networkstatic/iperf3 -n test --restart=Never -- -s
-
-kubectl run iperf-client --image=networkstatic/iperf3 -n test --restart=Never -- \
+Pod to Pod in between to Nodes:
+kubectl run iperf-server --image=networkstatic/iperf3 --overrides='{"spec":{"nodeSelector":{"kubernetes.io/hostname":"node1"}}}' --restart=Never -- -s
+kubectl run iperf-client --image=networkstatic/iperf3 --overrides='{"spec":{"nodeSelector":{"kubernetes.io/hostname":"node2"}}}' --restart=Never -- \
   -- iperf3 -c iperf-server -t 30
+
+Pod-to-Service-to-Pod:
+kubectl create deploy iperf-deploy --image=networkstatic/iperf3 --replicas=3 -- /bin/sh -c "while true; do sleep 3600; done"
+kubectl expose deploy iperf-deploy --port=5201 --target-port=5201
+kubectl run iperf-client --image=networkstatic/iperf3 --rm -it -- \
+  iperf3 -c iperf-deploy -P 5 -t 30
+
 
