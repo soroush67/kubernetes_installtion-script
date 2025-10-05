@@ -1,58 +1,64 @@
-
-##  File: `create-k8s-users.sh`
-
 #!/bin/bash
 # ========================================================================
-# Kubernetes User Provisioning Script
+# Kubernetes User Provisioning Script (Dynamic RBAC version)
 # Author: Majid Heydari
 # Description:
-#   This script automates the creation of Kubernetes users using CSR.
-#   It generates keys, signs certificates, assigns RBAC roles, 
-#   and produces ready-to-use kubeconfig files.
+#   Dynamically create Kubernetes users using CSR-based authentication.
+#   - You define resources and roles at the top of the script.
+#   - No hardcoded roles (like readonly).
 #
 # Usage:
-#   1. Single user mode:
-#        ./create-k8s-users.sh <username> <group> <role> <namespace>
-#        Example: ./create-k8s-users.sh anisa dev-team readonly dev
-#
-#   2. Bulk mode (from CSV):
-#        ./create-k8s-users.sh -f users.csv
-#        CSV format: username,group,role,namespace
-#
-# Requirements:
-#   - Must be executed by a Kubernetes admin node with kubectl access
-#   - OpenSSL installed
+#   ./create-k8s-user-dynamic.sh <username> <group> <namespace>
+#   Example: ./create-k8s-user-dynamic.sh anisa dev-team dev
 # ========================================================================
 
 set -euo pipefail
 
+# =========[ ADMIN CONFIGURATION SECTION ]=========
+# These variables define the scope of access for all users you create.
+# Edit them before running the script.
+
+# List of Kubernetes resources the user should access
+RESOURCES=("pods" "services" "configmaps")
+
+# Verbs that define allowed actions for the user
+# Example: ("get" "list" "watch") or ("get" "list" "create" "update" "delete")
+VERBS=("get" "list" "watch")
+
+# Role type: "Role" (namespace-level) or "ClusterRole" (cluster-wide)
+ROLE_KIND="Role"
+
+# Existing role name to use (if you don't want to create a custom one)
+# Leave empty ("") to create a new one dynamically
+EXISTING_ROLE=""
+
+# =========[ SCRIPT CONFIG ]=========
 K8S_CA_DIR="/etc/kubernetes/pki"
 OUTPUT_BASE="/tmp/k8s-users"
 mkdir -p "$OUTPUT_BASE"
 
-# -------------------------------
-# Functions
-# -------------------------------
+# =========[ ARGUMENTS ]=========
+if [[ $# -lt 3 ]]; then
+    echo "Usage: $0 <username> <group> <namespace>"
+    exit 1
+fi
 
-generate_user() {
-    local USERNAME=$1
-    local GROUP=$2
-    local ROLE=$3
-    local NAMESPACE=$4
+USERNAME=$1
+GROUP=$2
+NAMESPACE=$3
 
-    local USER_DIR="${OUTPUT_BASE}/${USERNAME}"
-    mkdir -p "$USER_DIR"
+USER_DIR="${OUTPUT_BASE}/${USERNAME}"
+mkdir -p "$USER_DIR"
 
-    echo "[*] Creating user: $USERNAME | group: $GROUP | role: $ROLE | namespace: $NAMESPACE"
+echo "[*] Creating user: $USERNAME (group: $GROUP, namespace: $NAMESPACE)"
 
-    # 1. Generate private key & CSR
-    openssl genrsa -out "${USER_DIR}/${USERNAME}.key" 2048
-    openssl req -new -key "${USER_DIR}/${USERNAME}.key" -subj "/CN=${USERNAME}/O=${GROUP}" -out "${USER_DIR}/${USERNAME}.csr"
+# =========[ 1. Generate Private Key and CSR ]=========
+openssl genrsa -out "${USER_DIR}/${USERNAME}.key" 2048
+openssl req -new -key "${USER_DIR}/${USERNAME}.key" -subj "/CN=${USERNAME}/O=${GROUP}" -out "${USER_DIR}/${USERNAME}.csr"
 
-    local CSR_BASE64
-    CSR_BASE64=$(base64 -w 0 "${USER_DIR}/${USERNAME}.csr")
+CSR_BASE64=$(base64 -w 0 "${USER_DIR}/${USERNAME}.csr")
 
-    cat > "${USER_DIR}/${USERNAME}-csr.yaml" <<EOF
+cat > "${USER_DIR}/${USERNAME}-csr.yaml" <<EOF
 apiVersion: certificates.k8s.io/v1
 kind: CertificateSigningRequest
 metadata:
@@ -66,42 +72,37 @@ spec:
   - client auth
 EOF
 
-    # 2. Submit CSR and approve
-    kubectl apply -f "${USER_DIR}/${USERNAME}-csr.yaml"
-    sleep 2
-    kubectl certificate approve "${USERNAME}"
+kubectl apply -f "${USER_DIR}/${USERNAME}-csr.yaml"
+sleep 2
+kubectl certificate approve "${USERNAME}"
+kubectl get csr "${USERNAME}" -o jsonpath='{.status.certificate}' | base64 -d > "${USER_DIR}/${USERNAME}.crt"
 
-    # 3. Retrieve the signed certificate
-    kubectl get csr "${USERNAME}" -o jsonpath='{.status.certificate}' | base64 -d > "${USER_DIR}/${USERNAME}.crt"
+# =========[ 2. Create or Reuse Role ]=========
+ROLE_NAME="${USERNAME}-custom-role"
 
-    # 4. Create Role or use existing ClusterRole
-    local ROLE_NAME ROLE_KIND
-    if [[ "$ROLE" == "readonly" ]]; then
-        ROLE_KIND="Role"
-        ROLE_NAME="${USERNAME}-readonly"
-        cat <<EOF | kubectl apply -f -
+if [[ -z "$EXISTING_ROLE" ]]; then
+    echo "[*] Creating new ${ROLE_KIND} '${ROLE_NAME}' with custom rules..."
+    cat <<EOF | kubectl apply -f -
 apiVersion: rbac.authorization.k8s.io/v1
-kind: Role
+kind: ${ROLE_KIND}
 metadata:
   name: ${ROLE_NAME}
   namespace: ${NAMESPACE}
 rules:
 - apiGroups: [""]
-  resources: ["pods","services","configmaps","secrets"]
-  verbs: ["get","list","watch"]
+  resources: [$(printf '"%s",' "${RESOURCES[@]}" | sed 's/,$//')]
+  verbs: [$(printf '"%s",' "${VERBS[@]}" | sed 's/,$//')]
 EOF
-    elif [[ "$ROLE" == "edit" ]]; then
-        ROLE_KIND="ClusterRole"
-        ROLE_NAME="edit"
-    else
-        ROLE_KIND="ClusterRole"
-        ROLE_NAME="cluster-admin"
-    fi
+else
+    ROLE_NAME="$EXISTING_ROLE"
+    echo "[*] Using existing ${ROLE_KIND} '${ROLE_NAME}'"
+fi
 
-    # 5. Create RoleBinding or ClusterRoleBinding
-    local BIND_NAME="${USERNAME}-binding"
-    if [[ "$ROLE_KIND" == "Role" ]]; then
-        cat <<EOF | kubectl apply -f -
+# =========[ 3. Create Binding ]=========
+BIND_NAME="${USERNAME}-binding"
+
+if [[ "$ROLE_KIND" == "Role" ]]; then
+    cat <<EOF | kubectl apply -f -
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
@@ -116,8 +117,8 @@ roleRef:
   name: ${ROLE_NAME}
   apiGroup: rbac.authorization.k8s.io
 EOF
-    else
-        cat <<EOF | kubectl apply -f -
+else
+    cat <<EOF | kubectl apply -f -
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
@@ -131,14 +132,13 @@ roleRef:
   name: ${ROLE_NAME}
   apiGroup: rbac.authorization.k8s.io
 EOF
-    fi
+fi
 
-    # 6. Generate kubeconfig for the user
-    local CLUSTER_NAME CLUSTER_SERVER
-    CLUSTER_NAME=$(kubectl config view --minify -o jsonpath='{.clusters[0].name}')
-    CLUSTER_SERVER=$(kubectl config view --minify -o jsonpath='{.clusters[0].cluster.server}')
+# =========[ 4. Create Kubeconfig ]=========
+CLUSTER_NAME=$(kubectl config view --minify -o jsonpath='{.clusters[0].name}')
+CLUSTER_SERVER=$(kubectl config view --minify -o jsonpath='{.clusters[0].cluster.server}')
 
-    cat > "${USER_DIR}/${USERNAME}.kubeconfig" <<EOF
+cat > "${USER_DIR}/${USERNAME}.kubeconfig" <<EOF
 apiVersion: v1
 kind: Config
 clusters:
@@ -159,90 +159,6 @@ users:
     client-key-data: $(base64 -w 0 ${USER_DIR}/${USERNAME}.key)
 EOF
 
-    echo "[+] User ${USERNAME} created successfully. Files saved in ${USER_DIR}"
-}
-
-# -------------------------------
-# Bulk mode (CSV file)
-# -------------------------------
-if [[ "${1:-}" == "-f" ]]; then
-    CSV_FILE=$2
-    if [[ ! -f "$CSV_FILE" ]]; then
-        echo "Error: File '$CSV_FILE' not found."
-        exit 1
-    fi
-
-    echo "[*] Processing bulk user creation from: $CSV_FILE"
-    while IFS=',' read -r USERNAME GROUP ROLE NAMESPACE; do
-        [[ "$USERNAME" =~ ^#.*$ || -z "$USERNAME" ]] && continue
-        generate_user "$USERNAME" "$GROUP" "$ROLE" "$NAMESPACE"
-    done < "$CSV_FILE"
-
-else
-    if [[ $# -lt 4 ]]; then
-        echo "Usage:"
-        echo "  ./create-k8s-users.sh <username> <group> <role> <namespace>"
-        echo "  ./create-k8s-users.sh -f <users.csv>"
-        exit 1
-    fi
-
-    generate_user "$1" "$2" "$3" "$4"
-fi
-```
-
----
-
-##  Example CSV (`users.csv`)
-
-```csv
-# username,group,role,namespace
-anisa,dev-team,readonly,dev
-majid,backend,edit,staging
-alex,ops,cluster-admin,default
-```
-
----
-
-##  Example usage
-
-### Create one user:
-
-```bash
-sudo ./create-k8s-users.sh anisa dev-team readonly dev
-```
-
-### Create multiple users:
-
-```bash
-sudo ./create-k8s-users.sh -f users.csv
-```
-
----
-
-##  Output structure
-
-Each user gets a directory at `/tmp/k8s-users/<username>` containing:
-
-| File                | Description                  |
-| ------------------- | ---------------------------- |
-| `<user>.key`        | Private key                  |
-| `<user>.csr`        | Certificate Signing Request  |
-| `<user>.crt`        | Signed certificate           |
-| `<user>.kubeconfig` | Ready-to-use kubeconfig file |
-| `<user>-csr.yaml`   | YAML manifest for the CSR    |
-
----
-
-##  Bonus tip
-
-You can commit this script to GitHub in a repo like:
-
-
-github.com/<your-username>/k8s-user-management
-
-
-and include a `README.md` explaining:
-
-* Prerequisites (`kubectl`, `openssl`)
-* Usage examples
-* CSV format
+echo "[✅] User '${USERNAME}' created successfully."
+echo "[📁] Files located at: ${USER_DIR}"
+echo "[🔑] Kubeconfig: ${USER_DIR}/${USERNAME}.kubeconfig"
