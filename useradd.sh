@@ -1,5 +1,5 @@
 
-## 📄 File: `create-k8s-users.sh`
+##  File: `create-k8s-users.sh`
 
 #!/bin/bash
 # ========================================================================
@@ -246,7 +246,3 @@ and include a `README.md` explaining:
 * Prerequisites (`kubectl`, `openssl`)
 * Usage examples
 * CSV format
-
----
-
-Would you like me to generate a **`README.md`** template for this script (clean, GitHub-ready, with badges and usage examples)? It’ll make your repo look fully professional.
