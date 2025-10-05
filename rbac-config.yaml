@@ -1,0 +1,19 @@
+users:
+  - name: soroush
+    group: monitoring
+    namespaces:
+      - name: dev
+        resources: ["pods", "services"]
+        verbs: ["get", "list", "watch"]
+      - name: qa
+        resources: ["pods", "deployments"]
+        verbs: ["get", "list", "create", "update"]
+      - name: prod
+        resources: ["pods"]
+        verbs: ["get"]
+  - name: anisa
+    group: frontend
+    namespaces:
+      - name: staging
+        resources: ["pods", "services", "configmaps"]
+        verbs: ["get", "list", "create", "delete"]
