@@ -151,7 +151,7 @@ kubectl create clusterrolebinding myuser-binding \
 
 ### 🧾 License
 
-MIT License © [Majid Heydari](https://github.com/<your-username>)
+MIT License © [Soroush Farzamnik](https://github.com/<your-username>)
 
 ---
 
