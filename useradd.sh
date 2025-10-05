@@ -1,13 +1,6 @@
-عالی 👏 — حالا نسخه‌ی حرفه‌ای و **کاملاً قابل‌انتشار در GitHub** رو برات می‌نویسم:
-✅ کامنت‌ها، ساختار و naming کاملاً انگلیسی و clean هستند
-✅ پشتیبانی از فایل CSV برای bulk user creation داره
-✅ از best practices DevOps برای portability و error handling استفاده می‌کنه
-
----
 
 ## 📄 File: `create-k8s-users.sh`
 
-```bash
 #!/bin/bash
 # ========================================================================
 # Kubernetes User Provisioning Script
@@ -199,7 +192,7 @@ fi
 
 ---
 
-## 📘 Example CSV (`users.csv`)
+##  Example CSV (`users.csv`)
 
 ```csv
 # username,group,role,namespace
@@ -210,7 +203,7 @@ alex,ops,cluster-admin,default
 
 ---
 
-## 🧩 Example usage
+##  Example usage
 
 ### Create one user:
 
@@ -226,7 +219,7 @@ sudo ./create-k8s-users.sh -f users.csv
 
 ---
 
-## 📁 Output structure
+##  Output structure
 
 Each user gets a directory at `/tmp/k8s-users/<username>` containing:
 
@@ -240,13 +233,13 @@ Each user gets a directory at `/tmp/k8s-users/<username>` containing:
 
 ---
 
-## 🧠 Bonus tip
+##  Bonus tip
 
 You can commit this script to GitHub in a repo like:
 
-```
+
 github.com/<your-username>/k8s-user-management
-```
+
 
 and include a `README.md` explaining:
 
