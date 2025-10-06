@@ -60,7 +60,7 @@ systemctl restart containerd.service ; systemctl status containerd.service
 # install CNI plugin
 mkdir -p /opt/cni/plugin
 wget -c -t 999 "cni-plugins-linux-amd64<version>.tgz"
-tar Cxvfz cni-plugins-linux-amd64<version>.tgz
+tar Cxvfz /opt/cni/plugin cni-plugins-linux-amd64<version>.tgz
 
 # edit /etc/containerd/config.toml for manage cgroup
 
