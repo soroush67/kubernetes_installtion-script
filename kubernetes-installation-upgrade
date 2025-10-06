@@ -65,6 +65,7 @@ tar Cxvfz /opt/cni/plugin cni-plugins-linux-amd64<version>.tgz
 # edit /etc/containerd/config.toml for manage cgroup
 
 [plugins."io.containerd.grpc.v1.cri".containerd.runtimes.runc] ...
+SystemdCgroup = true
 [plugins."io.containerd.grpc.v1.cri".containerd.runtimes.runc.options]
   SystemdCgroup = true
 
