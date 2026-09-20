@@ -1,0 +1,554 @@
+cat > /root/setup-iperf-cross-namespace.sh <<'EOF'
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+# ============================================================
+# Configuration
+# ============================================================
+
+MONITORING_NS="monitoring"
+
+CLIENT_NS="iperf-client-ns"
+SERVER_NS="iperf-server-ns"
+
+CLIENT_POD="iperf-client"
+SERVER_POD="iperf-server"
+
+IPERF_IMAGE="docker.arvancloud.ir/networkstatic/iperf3"
+IPERF_PORT="5201"
+
+GRAFANA_DASHBOARD_CM="grafana-loadtest-dashboard"
+
+DASHBOARD_FILE_NAME="iperf-cross-namespace-dashboard.json"
+DASHBOARD_TITLE="Kubernetes iPerf Cross-Namespace Test"
+DASHBOARD_UID="kubernetes-iperf-cross-namespace"
+
+TEST_DURATION="120"
+
+BACKUP_DIR="/root/monitoring-backup"
+
+# ============================================================
+# Helper
+# ============================================================
+
+echo
+echo "============================================================"
+echo " Kubernetes iPerf Cross-Namespace Setup"
+echo "============================================================"
+echo
+
+mkdir -p "${BACKUP_DIR}"
+
+# ============================================================
+# 1. Pre-checks
+# ============================================================
+
+echo "[1/9] Checking Kubernetes..."
+
+kubectl get nodes >/dev/null
+
+echo "Kubernetes API: OK"
+
+echo
+echo "Checking Grafana..."
+
+kubectl -n "${MONITORING_NS}" get deployment grafana >/dev/null
+
+echo "Grafana Deployment: OK"
+
+echo
+echo "Checking Prometheus..."
+
+kubectl -n "${MONITORING_NS}" get deployment prometheus >/dev/null
+
+echo "Prometheus Deployment: OK"
+
+# ============================================================
+# 2. Create namespaces
+# ============================================================
+
+echo
+echo "[2/9] Creating namespaces..."
+
+kubectl create namespace "${CLIENT_NS}" \
+  --dry-run=client -o yaml | kubectl apply -f -
+
+kubectl create namespace "${SERVER_NS}" \
+  --dry-run=client -o yaml | kubectl apply -f -
+
+# ============================================================
+# 3. Create iPerf server
+# ============================================================
+
+echo
+echo "[3/9] Creating iperf-server..."
+
+cat > /tmp/iperf-cross-server.yaml <<EOF_SERVER
+apiVersion: v1
+kind: Pod
+metadata:
+  name: ${SERVER_POD}
+  namespace: ${SERVER_NS}
+  labels:
+    app: ${SERVER_POD}
+spec:
+  restartPolicy: Always
+  containers:
+  - name: ${SERVER_POD}
+    image: ${IPERF_IMAGE}
+    imagePullPolicy: IfNotPresent
+    args:
+    - "-s"
+    ports:
+    - name: iperf
+      containerPort: ${IPERF_PORT}
+      protocol: TCP
+EOF_SERVER
+
+kubectl apply -f /tmp/iperf-cross-server.yaml
+
+# ============================================================
+# 4. Create permanent iPerf client
+# ============================================================
+
+echo
+echo "[4/9] Creating iperf-client..."
+
+cat > /tmp/iperf-cross-client.yaml <<EOF_CLIENT
+apiVersion: v1
+kind: Pod
+metadata:
+  name: ${CLIENT_POD}
+  namespace: ${CLIENT_NS}
+  labels:
+    app: ${CLIENT_POD}
+spec:
+  restartPolicy: Always
+  containers:
+  - name: ${CLIENT_POD}
+    image: ${IPERF_IMAGE}
+    imagePullPolicy: IfNotPresent
+    command:
+    - sleep
+    - "2147483647"
+EOF_CLIENT
+
+kubectl apply -f /tmp/iperf-cross-client.yaml
+
+# ============================================================
+# 5. Wait for pods
+# ============================================================
+
+echo
+echo "[5/9] Waiting for Pods..."
+
+kubectl wait \
+  -n "${SERVER_NS}" \
+  --for=condition=Ready \
+  pod/"${SERVER_POD}" \
+  --timeout=120s
+
+kubectl wait \
+  -n "${CLIENT_NS}" \
+  --for=condition=Ready \
+  pod/"${CLIENT_POD}" \
+  --timeout=120s
+
+echo
+echo "Client:"
+kubectl get pod -n "${CLIENT_NS}" "${CLIENT_POD}" -o wide
+
+echo
+echo "Server:"
+kubectl get pod -n "${SERVER_NS}" "${SERVER_POD}" -o wide
+
+# ============================================================
+# 6. Check Prometheus cAdvisor
+# ============================================================
+
+echo
+echo "[6/9] Checking cAdvisor target..."
+
+if curl -fsS http://127.0.0.1:9090/-/healthy >/dev/null 2>&1; then
+
+    curl -sS http://127.0.0.1:9090/api/v1/targets | \
+    python3 -c '
+import sys,json
+
+d=json.load(sys.stdin)
+
+for t in d["data"]["activeTargets"]:
+    if t.get("labels",{}).get("job") == "cadvisor":
+        print(
+            "cAdvisor:",
+            "health =", t.get("health"),
+            "| interval =", t.get("scrapeInterval"),
+            "| error =", t.get("lastError","")
+        )
+'
+else
+    echo "Prometheus localhost:9090 is not currently reachable."
+    echo "This does not stop dashboard provisioning."
+fi
+
+# ============================================================
+# 7. Backup current Grafana dashboard ConfigMap
+# ============================================================
+
+echo
+echo "[7/9] Backing up Grafana Dashboard ConfigMap..."
+
+BACKUP_FILE="${BACKUP_DIR}/${GRAFANA_DASHBOARD_CM}-$(date +%Y%m%d-%H%M%S).yaml"
+
+kubectl -n "${MONITORING_NS}" \
+  get configmap "${GRAFANA_DASHBOARD_CM}" \
+  -o yaml > "${BACKUP_FILE}"
+
+echo "Backup:"
+echo "${BACKUP_FILE}"
+
+# ============================================================
+# 8. Create Grafana Dashboard
+# ============================================================
+
+echo
+echo "[8/9] Creating Cross-Namespace Grafana Dashboard..."
+
+cat > /tmp/iperf-cross-namespace-dashboard.json <<EOF_DASHBOARD
+{
+  "annotations": {
+    "list": []
+  },
+  "editable": true,
+  "graphTooltip": 1,
+  "panels": [
+    {
+      "type": "timeseries",
+      "title": "Cross-Namespace iPerf Network Throughput",
+      "description": "${CLIENT_NS}/${CLIENT_POD} -> ${SERVER_NS}/${SERVER_POD}",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 12,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bps",
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": true
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(container_network_transmit_bytes_total{namespace=\"${CLIENT_NS}\",pod=\"${CLIENT_POD}\",interface!=\"lo\"}[30s])) * 8",
+          "legendFormat": "${CLIENT_NS}/${CLIENT_POD} TX",
+          "range": true
+        },
+        {
+          "refId": "B",
+          "expr": "sum(rate(container_network_receive_bytes_total{namespace=\"${SERVER_NS}\",pod=\"${SERVER_POD}\",interface!=\"lo\"}[30s])) * 8",
+          "legendFormat": "${SERVER_NS}/${SERVER_POD} RX",
+          "range": true
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Cross-Namespace Pod CPU Usage",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 0,
+        "y": 12
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": true
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(container_cpu_usage_seconds_total{namespace=\"${CLIENT_NS}\",pod=\"${CLIENT_POD}\",container!=\"\",container!=\"POD\"}[30s])) * 100",
+          "legendFormat": "${CLIENT_NS}/${CLIENT_POD}",
+          "range": true
+        },
+        {
+          "refId": "B",
+          "expr": "sum(rate(container_cpu_usage_seconds_total{namespace=\"${SERVER_NS}\",pod=\"${SERVER_POD}\",container!=\"\",container!=\"POD\"}[30s])) * 100",
+          "legendFormat": "${SERVER_NS}/${SERVER_POD}",
+          "range": true
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Cross-Namespace Pod Memory Working Set",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 12,
+        "y": 12
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": true
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(container_memory_working_set_bytes{namespace=\"${CLIENT_NS}\",pod=\"${CLIENT_POD}\",container!=\"\",container!=\"POD\"})",
+          "legendFormat": "${CLIENT_NS}/${CLIENT_POD}",
+          "range": true
+        },
+        {
+          "refId": "B",
+          "expr": "sum(container_memory_working_set_bytes{namespace=\"${SERVER_NS}\",pod=\"${SERVER_POD}\",container!=\"\",container!=\"POD\"})",
+          "legendFormat": "${SERVER_NS}/${SERVER_POD}",
+          "range": true
+        }
+      ]
+    }
+  ],
+  "refresh": "5s",
+  "schemaVersion": 41,
+  "tags": [
+    "iperf",
+    "cross-namespace",
+    "pod-to-pod",
+    "kubernetes"
+  ],
+  "templating": {
+    "list": []
+  },
+  "time": {
+    "from": "now-5m",
+    "to": "now"
+  },
+  "timezone": "browser",
+  "title": "${DASHBOARD_TITLE}",
+  "uid": "${DASHBOARD_UID}",
+  "version": 1
+}
+EOF_DASHBOARD
+
+python3 -m json.tool \
+  /tmp/iperf-cross-namespace-dashboard.json \
+  >/dev/null
+
+echo "Dashboard JSON: OK"
+
+python3 - <<PY > /tmp/grafana-cross-dashboard-patch.json
+import json
+
+with open("/tmp/iperf-cross-namespace-dashboard.json") as f:
+    dashboard = f.read()
+
+print(json.dumps({
+    "data": {
+        "${DASHBOARD_FILE_NAME}": dashboard
+    }
+}))
+PY
+
+kubectl -n "${MONITORING_NS}" \
+  patch configmap "${GRAFANA_DASHBOARD_CM}" \
+  --type=merge \
+  --patch-file=/tmp/grafana-cross-dashboard-patch.json
+
+echo
+echo "Grafana dashboard files:"
+
+kubectl -n "${MONITORING_NS}" \
+  get configmap "${GRAFANA_DASHBOARD_CM}" \
+  -o json | \
+python3 -c '
+import sys,json
+
+d=json.load(sys.stdin)
+
+for k in d.get("data",{}):
+    print(" -", k)
+'
+
+# ============================================================
+# 9. Restart Grafana
+# ============================================================
+
+echo
+echo "[9/9] Restarting Grafana..."
+
+kubectl -n "${MONITORING_NS}" \
+  rollout restart deployment/grafana
+
+kubectl -n "${MONITORING_NS}" \
+  rollout status deployment/grafana \
+  --timeout=120s
+
+echo
+echo "Grafana:"
+kubectl -n "${MONITORING_NS}" \
+  get pod -l app=grafana
+
+# ============================================================
+# Get server Pod IP
+# ============================================================
+
+SERVER_POD_IP=$(kubectl get pod \
+  -n "${SERVER_NS}" \
+  "${SERVER_POD}" \
+  -o jsonpath='{.status.podIP}')
+
+CLIENT_POD_IP=$(kubectl get pod \
+  -n "${CLIENT_NS}" \
+  "${CLIENT_POD}" \
+  -o jsonpath='{.status.podIP}')
+
+echo
+echo "============================================================"
+echo " Cross-Namespace Test Environment"
+echo "============================================================"
+echo
+echo "Client:"
+echo "  Namespace : ${CLIENT_NS}"
+echo "  Pod       : ${CLIENT_POD}"
+echo "  Pod IP    : ${CLIENT_POD_IP}"
+echo
+echo "Server:"
+echo "  Namespace : ${SERVER_NS}"
+echo "  Pod       : ${SERVER_POD}"
+echo "  Pod IP    : ${SERVER_POD_IP}"
+echo
+echo "Dashboard:"
+echo "  ${DASHBOARD_TITLE}"
+echo
+echo "Traffic path:"
+echo
+echo "  ${CLIENT_NS}/${CLIENT_POD}"
+echo "          |"
+echo "          | Pod IP / TCP ${IPERF_PORT}"
+echo "          v"
+echo "  ${SERVER_NS}/${SERVER_POD}"
+echo
+echo "============================================================"
+
+# ============================================================
+# Run test
+# ============================================================
+
+echo
+echo "Waiting 15 seconds for Grafana/Prometheus..."
+sleep 15
+
+echo
+echo "============================================================"
+echo " Starting Cross-Namespace Pod-to-Pod iPerf3 Test"
+echo "============================================================"
+echo
+
+echo "Target Pod IP: ${SERVER_POD_IP}"
+echo "Duration     : ${TEST_DURATION}s"
+echo "Port         : ${IPERF_PORT}"
+echo
+echo "Start time   : $(date)"
+echo
+
+kubectl exec \
+  -n "${CLIENT_NS}" \
+  "${CLIENT_POD}" -- \
+  iperf3 \
+  -c "${SERVER_POD_IP}" \
+  -p "${IPERF_PORT}" \
+  -t "${TEST_DURATION}" \
+  -i 1
+
+echo
+echo "============================================================"
+echo " Test completed"
+echo "============================================================"
+echo
+echo "Open Grafana dashboard:"
+echo
+echo "  ${DASHBOARD_TITLE}"
+echo
+echo "Recommended Grafana time range:"
+echo
+echo "  Last 5 minutes"
+echo
+
+EOF
